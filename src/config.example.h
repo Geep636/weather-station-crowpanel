@@ -4,9 +4,6 @@
 #define WIFI_SSID "Your WiFi SSID"
 #define WIFI_PASSWORD "Your WiFi Password"
 
-// OpenWeatherMap API key
-#define OPEN_WEATHER_MAP_API_KEY "b0123456789012345678901234567890" // Enter your OpenWeatherMap API key here
-
 // choose metric or imperial
 #define UNITS "metric"
 

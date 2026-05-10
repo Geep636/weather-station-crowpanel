@@ -41,7 +41,6 @@ private:
   uint8_t imageBW[27200];
 
   // Network and API configuration (loaded from ConfigManager)
-  String openWeatherMapApiKey;
   String apiParamLatitude;
   String apiParamLongitude;
   String locationName;
@@ -106,7 +105,6 @@ private:
    * Load configuration from ConfigManager
    */
   void loadConfiguration() {
-    openWeatherMapApiKey = configManager.getApiKey();
     apiParamLatitude = configManager.getLatitude();
     apiParamLongitude = configManager.getLongitude();
     locationName = configManager.getLocationName();
@@ -339,10 +337,11 @@ private:
   }
 
   String constructApiEndpointUrl() {
-    return "https://api.openweathermap.org/data/3.0/onecall?lat=" +
-           apiParamLatitude + "&lon=" + apiParamLongitude +
-           "&exclude=minutely" + "&APPID=" + openWeatherMapApiKey +
-           "&units=" + units;
+    String endpoint = "https://api.open-meteo.com/v1/forecast?latitude=" + apiParamLatitude + "&longitude=" + apiParamLongitude + "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,surface_pressure,wind_speed_10m,uv_index&hourly=temperature_2m,weather_code&daily=sunrise,sunset&timezone=auto&timeformat=unixtime";
+    if (units == "imperial") {
+      endpoint += "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch";
+    }
+    return endpoint;
   }
 
   void setRTC(long unixTime) {
@@ -353,28 +352,38 @@ private:
     settimeofday(&now, NULL);
   }
 
+  String mapWmoCodeToIcon(int code, int is_day) {
+    String suffix = is_day ? "d" : "n";
+    if (code == 0) return "01" + suffix;
+    if (code == 1 || code == 2) return "02" + suffix;
+    if (code == 3) return "04" + suffix;
+    if (code == 45 || code == 48) return "50" + suffix;
+    if (code >= 51 && code <= 57) return "09" + suffix;
+    if (code >= 61 && code <= 65) return "10" + suffix;
+    if (code >= 66 && code <= 77) return "13" + suffix;
+    if (code >= 80 && code <= 82) return "09" + suffix;
+    if (code >= 85 && code <= 86) return "13" + suffix;
+    if (code >= 95) return "11" + suffix;
+    return "01" + suffix; // fallback
+  }
+
   /**
    * Processes the weather data from the API response
    */
   bool processWeatherData() {
-    // Extract and process weather data
-    weatherInfo.weather =
-        weatherApiResponse["current"]["weather"][0]["main"].as<String>();
-    weatherInfo.icon =
-        weatherApiResponse["current"]["weather"][0]["icon"].as<String>();
-    weatherInfo.currentDateTime =
-        weatherApiResponse["current"]["dt"].as<long>() +
-        weatherApiResponse["timezone_offset"].as<long>();
-    weatherInfo.sunrise = weatherApiResponse["current"]["sunrise"].as<long>();
-    weatherInfo.sunset = weatherApiResponse["current"]["sunset"].as<long>();
-    weatherInfo.temperature =
-        String(weatherApiResponse["current"]["temp"].as<float>(), 1);
-    weatherInfo.humidity =
-        String(weatherApiResponse["current"]["humidity"].as<int>());
-    weatherInfo.pressure =
-        String(weatherApiResponse["current"]["pressure"].as<int>());
-    weatherInfo.windSpeed =
-        String(weatherApiResponse["current"]["wind_speed"].as<float>(), 1);
+    int weatherCode = weatherApiResponse["current"]["weather_code"].as<int>();
+    int isDay = weatherApiResponse["current"]["is_day"].as<int>();
+    weatherInfo.icon = mapWmoCodeToIcon(weatherCode, isDay);
+    
+    long utcOffset = weatherApiResponse["utc_offset_seconds"].as<long>();
+    weatherInfo.currentDateTime = weatherApiResponse["current"]["time"].as<long>() + utcOffset;
+    weatherInfo.sunrise = weatherApiResponse["daily"]["sunrise"][0].as<long>() + utcOffset;
+    weatherInfo.sunset = weatherApiResponse["daily"]["sunset"][0].as<long>() + utcOffset;
+    
+    weatherInfo.temperature = String(weatherApiResponse["current"]["temperature_2m"].as<float>(), 1);
+    weatherInfo.humidity = String(weatherApiResponse["current"]["relative_humidity_2m"].as<int>());
+    weatherInfo.pressure = String(weatherApiResponse["current"]["surface_pressure"].as<int>());
+    weatherInfo.windSpeed = String(weatherApiResponse["current"]["wind_speed_10m"].as<float>(), 1);
     weatherInfo.timezone = weatherApiResponse["timezone"].as<String>();
 
     // set RTC to set current time (if RTC is available)
@@ -486,22 +495,27 @@ private:
     return success;
   }
 
-  void drawForecastItem(uint16_t x, uint16_t y, JsonObject hourlyData) {
+  void drawForecastItem(uint16_t x, uint16_t y, int index) {
     char buffer[STRING_BUFFER_SIZE];
 
-    String icon;
-    if (!hourlyData["weather"][0]["icon"].isNull()) {
-      icon = "icon_" + hourlyData["weather"][0]["icon"].as<String>();
-    } else {
-      icon = "na_md"; // default fallback icon
-    }
+    int weatherCode = weatherApiResponse["hourly"]["weather_code"][index].as<int>();
+    
+    long forecastTimeInt = weatherApiResponse["hourly"]["time"][index].as<long>() +
+                           weatherApiResponse["utc_offset_seconds"].as<long>();
+                           
+    long sunrise = weatherInfo.sunrise;
+    long sunset = weatherInfo.sunset;
+    long timeOfDay = forecastTimeInt % 86400;
+    long sunriseOfDay = sunrise % 86400;
+    long sunsetOfDay = sunset % 86400;
+    int isDay = (timeOfDay >= sunriseOfDay && timeOfDay <= sunsetOfDay) ? 1 : 0;
+    
+    String icon = "icon_" + mapWmoCodeToIcon(weatherCode, isDay);
 
     snprintf(buffer, sizeof(buffer), "%s_sm", icon.c_str());
     EPD_drawImage(x + 2, y, getIcon(buffer));
 
     // Time formatting (10 AM, 9 PM, etc.)
-    long forecastTimeInt = hourlyData["dt"].as<long>() +
-                           weatherApiResponse["timezone_offset"].as<long>();
     String forecastTime = convertUnixTimeToShortDateTimeString(forecastTimeInt);
 
     int splitIndex = forecastTime.indexOf(' ');
@@ -524,7 +538,7 @@ private:
 
     // Temperature
     memset(buffer, 0, sizeof(buffer));
-    float temp = hourlyData["temp"].as<float>();
+    float temp = weatherApiResponse["hourly"]["temperature_2m"][index].as<float>();
     int tempInt = (int)temp;
     snprintf(buffer, sizeof(buffer), "%d", tempInt);
     EPD_ShowString(x + 46, y + 87, buffer, FONT_SIZE_38, BLACK, true);
@@ -537,7 +551,7 @@ private:
     char buffer[STRING_BUFFER_SIZE];
 
     // Check if hourly data exists
-    if (weatherApiResponse["hourly"].isNull()) {
+    if (weatherApiResponse["hourly"].isNull() || weatherApiResponse["hourly"]["time"].isNull()) {
       memset(buffer, 0, sizeof(buffer));
       snprintf(buffer, sizeof(buffer), "%s",
                "Error: API not responding with hourly forecast data.");
@@ -546,7 +560,7 @@ private:
     }
 
     // Get the hourly array length
-    size_t availableHours = weatherApiResponse["hourly"].size();
+    size_t availableHours = weatherApiResponse["hourly"]["time"].size();
     if (availableHours == 0) {
       memset(buffer, 0, sizeof(buffer));
       snprintf(buffer, sizeof(buffer), "%s",
@@ -564,9 +578,8 @@ private:
          i += hourInterval, counter++) {
       if (i >= availableHours)
         break;
-      JsonObject hourly = weatherApiResponse["hourly"][i];
-      if (!hourly["temp"].isNull()) {
-        int tempInt = (int)hourly["temp"].as<float>();
+      if (!weatherApiResponse["hourly"]["temperature_2m"][i].isNull()) {
+        int tempInt = (int)weatherApiResponse["hourly"]["temperature_2m"][i].as<float>();
         int tempWidth = 1;
         if (tempInt <= -10)
           tempWidth = 3; // -24, -10
@@ -594,14 +607,7 @@ private:
         break;
       }
 
-      JsonObject hourly = weatherApiResponse["hourly"][i];
-
-      if (hourly["weather"].isNull() || hourly["weather"].size() == 0) {
-        Serial.println("No weather data for this hour");
-        continue;
-      }
-
-      drawForecastItem(x, y, hourly);
+      drawForecastItem(x, y, i);
 
       // Offset for the next forecast item
       x = x + 107;
@@ -621,7 +627,7 @@ private:
       if (i >= availableHours)
         break;
 
-      temps[i] = weatherApiResponse["hourly"][i]["temp"].as<float>();
+      temps[i] = weatherApiResponse["hourly"]["temperature_2m"][i].as<float>();
 
       if (temps[i] < minTemp)
         minTemp = temps[i];
@@ -650,7 +656,7 @@ private:
     char buffer[STRING_BUFFER_SIZE];
 
     // Check if hourly data exists
-    if (weatherApiResponse["hourly"].isNull()) {
+    if (weatherApiResponse["hourly"].isNull() || weatherApiResponse["hourly"]["time"].isNull()) {
       memset(buffer, 0, sizeof(buffer));
       snprintf(buffer, sizeof(buffer), "%s", "Error: No hourly data available");
       EPD_ShowString(x, y, buffer, FONT_SIZE_16, BLACK, true);
@@ -658,7 +664,7 @@ private:
     }
 
     // Get the hourly array length
-    size_t availableHours = weatherApiResponse["hourly"].size();
+    size_t availableHours = weatherApiResponse["hourly"]["time"].size();
     if (availableHours < 2) {
       memset(buffer, 0, sizeof(buffer));
       snprintf(buffer, sizeof(buffer), "%s",
@@ -701,8 +707,8 @@ private:
 
       // Label every 6 hours with time
       if (i % 6 == 0 || i == 1) {
-        long time = weatherApiResponse["hourly"][i]["dt"].as<long>() +
-                    weatherApiResponse["timezone_offset"].as<long>();
+        long time = weatherApiResponse["hourly"]["time"][i].as<long>() +
+                    weatherApiResponse["utc_offset_seconds"].as<long>();
         String timeStr = convertUnixTimeToShortDateTimeString(time);
 
         memset(buffer, 0, sizeof(buffer));
@@ -871,39 +877,26 @@ private:
                                  uint16_t unitOffsetX, uint16_t unitOffsetY) {
     char buffer[STRING_BUFFER_SIZE];
 
-    if (!weatherApiResponse["current"]["snow"].isNull() &&
-        !weatherApiResponse["current"]["snow"]["1h"].isNull()) {
-      // Snow
+    if (!weatherApiResponse["current"]["precipitation"].isNull() &&
+        weatherApiResponse["current"]["precipitation"].as<float>() > 0) {
+      // Precipitation
       memset(buffer, 0, sizeof(buffer));
       snprintf(
-          buffer, sizeof(buffer), "%s",
-          weatherApiResponse["current"]["snow"]["1h"].as<String>().c_str());
+          buffer, sizeof(buffer), "%.1f",
+          weatherApiResponse["current"]["precipitation"].as<float>());
       EPD_ShowStringRightAligned(centerX, y, buffer, FONT_SIZE_36, BLACK);
 
       memset(buffer, 0, sizeof(buffer));
-      snprintf(buffer, sizeof(buffer), "mm snow");
+      snprintf(buffer, sizeof(buffer), "mm precip");
       EPD_ShowString(centerX + unitOffsetX, y + unitOffsetY, buffer,
                      FONT_SIZE_16, BLACK, false);
-    } else if (!weatherApiResponse["current"]["rain"].isNull() &&
-               !weatherApiResponse["current"]["rain"]["1h"].isNull()) {
-      // Rain
-      memset(buffer, 0, sizeof(buffer));
-      snprintf(
-          buffer, sizeof(buffer), "%s",
-          weatherApiResponse["current"]["rain"]["1h"].as<String>().c_str());
-      EPD_ShowStringRightAligned(centerX, y, buffer, FONT_SIZE_36, BLACK);
-
-      memset(buffer, 0, sizeof(buffer));
-      snprintf(buffer, sizeof(buffer), "mm rain");
-      EPD_ShowString(centerX + unitOffsetX, y + unitOffsetY, buffer,
-                     FONT_SIZE_16, BLACK, false);
-    } else if (!weatherApiResponse["current"]["uvi"].isNull() &&
-               (weatherApiResponse["current"]["uvi"].as<float>() >
+    } else if (!weatherApiResponse["current"]["uv_index"].isNull() &&
+               (weatherApiResponse["current"]["uv_index"].as<float>() >
                 UVI_DISPLAY_THRESHOLD)) {
       // UVI
       memset(buffer, 0, sizeof(buffer));
       snprintf(buffer, sizeof(buffer), "%.1f",
-               weatherApiResponse["current"]["uvi"].as<float>());
+               weatherApiResponse["current"]["uv_index"].as<float>());
       EPD_ShowStringRightAligned(centerX, y, buffer, FONT_SIZE_36, BLACK);
 
       memset(buffer, 0, sizeof(buffer));
@@ -914,7 +907,7 @@ private:
       // Wind speed
       memset(buffer, 0, sizeof(buffer));
       snprintf(buffer, sizeof(buffer), "%.1f",
-               weatherApiResponse["current"]["wind_speed"].as<float>());
+               weatherApiResponse["current"]["wind_speed_10m"].as<float>());
       EPD_ShowStringRightAligned(centerX, y, buffer, FONT_SIZE_36, BLACK);
 
       memset(buffer, 0, sizeof(buffer));
@@ -969,14 +962,8 @@ private:
     String iconName = "icon_" + weatherInfo.icon + "_lg";
     EPD_drawImage(10, 1, getIcon(iconName.c_str()));
 
-    if (enableAlertDisplay && !weatherApiResponse["alerts"].isNull() &&
-        weatherApiResponse["alerts"].size() > 0) {
-      displayAlerts(270, 0);
-      displayTemperature(740, 70, false);
-    } else {
-      displayCurrentInfo(380, 30);
-      displayTemperature(740, 105, true);
-    }
+    displayCurrentInfo(380, 30);
+    displayTemperature(740, 105, true);
 
     // Display future forecast
     drawWeatherFutureForecast(270, 160, 5);
@@ -1176,47 +1163,7 @@ private:
         wakeReason = "Date change (midnight + 30s)";
       }
 
-      // Check for weather alerts
-      if (!weatherApiResponse["alerts"].isNull() &&
-          weatherApiResponse["alerts"].size() > 0) {
-        // Current time in unix timestamp
-        time_t now = currentTime;
-
-        // Iterate through alerts to find closest upcoming start or end time
-        for (size_t i = 0; i < weatherApiResponse["alerts"].size(); i++) {
-          if (!weatherApiResponse["alerts"][i]["start"].isNull()) {
-            time_t alertStartTime =
-                weatherApiResponse["alerts"][i]["start"].as<long>();
-
-            // If alert starts in the future
-            if (alertStartTime > now) {
-              uint64_t timeToAlertStart = (alertStartTime - now) * 1000000ULL;
-
-              // If this alert starts sooner than our current wake time
-              if (timeToAlertStart < sleepDuration) {
-                sleepDuration = timeToAlertStart;
-                wakeReason = "Upcoming alert start";
-              }
-            }
-          }
-
-          if (!weatherApiResponse["alerts"][i]["end"].isNull()) {
-            time_t alertEndTime =
-                weatherApiResponse["alerts"][i]["end"].as<long>();
-
-            // If alert ends in the future
-            if (alertEndTime > now) {
-              uint64_t timeToAlertEnd = (alertEndTime - now) * 1000000ULL;
-
-              // If this alert ends sooner than our current wake time
-              if (timeToAlertEnd < sleepDuration) {
-                sleepDuration = timeToAlertEnd;
-                wakeReason = "Alert end time";
-              }
-            }
-          }
-        }
-      }
+      // Removed weather alerts processing since Open-Meteo doesn't have an equivalent alerts array in this endpoint
 
       // Print current date and time in yyyy-mm-dd hh:mm:ss format
       char currentTimeBuffer[30];

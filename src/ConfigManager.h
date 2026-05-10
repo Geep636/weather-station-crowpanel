@@ -30,7 +30,6 @@
  * Configuration structure holding all user-configurable parameters
  */
 struct AppConfig {
-  String apiKey;
   String latitude;
   String longitude;
   String locationName;
@@ -45,10 +44,9 @@ struct AppConfig {
       : refreshMinutes(15), lowPowerMode(false), hourInterval(1),
         units("metric"), enableAlertDisplay(true) {}
 
-  // Check if config has been set (API key is required)
+  // Check if config has been set
   bool isValid() const {
-    return apiKey.length() > 0 && latitude.length() > 0 &&
-           longitude.length() > 0;
+    return latitude.length() > 0 && longitude.length() > 0;
   }
 };
 
@@ -60,7 +58,7 @@ struct AppConfig {
  *   configManager.begin(CONFIG_BUTTON_PIN);
  *
  *   // Access configuration
- *   String apiKey = configManager.getApiKey();
+ *   String latitude = configManager.getLatitude();
  */
 class ConfigManager {
 public:
@@ -101,7 +99,6 @@ public:
   bool isConfigured() const;
 
   // Configuration getters
-  String getApiKey() const { return config.apiKey; }
   String getLatitude() const { return config.latitude; }
   String getLongitude() const { return config.longitude; }
   String getLocationName() const { return config.locationName; }
@@ -133,7 +130,6 @@ private:
                               const char *) = nullptr;
 
   // WiFiManager custom parameters
-  WiFiManagerParameter *paramApiKey;
   WiFiManagerParameter *paramLatitude;
   WiFiManagerParameter *paramLongitude;
   WiFiManagerParameter *paramLocationName;
